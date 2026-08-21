@@ -13,13 +13,21 @@ import java.net.URL
 
 /**
  * Stage 7: POST contact sheets to the Anthropic Messages API and have
- * claude-sonnet-5 pick exactly 20 photos for the monthly book.
+ * claude-sonnet-5 pick a pool-scaled number of photos for the monthly book.
  */
 object Judge {
     private const val MODEL = "claude-sonnet-5"
     private const val ENDPOINT = "https://api.anthropic.com/v1/messages"
 
-    suspend fun judge(sheets: List<Bitmap>, shortlist: List<PhotoItem>): JudgeResult =
+    /** Never ask for a book the shortlist can't support: ~5/12 of the pool, clamped to 8..20. */
+    fun bookCount(shortlistSize: Int): Int = minOf(20, maxOf(8, shortlistSize * 5 / 12))
+
+    suspend fun judge(
+        sheets: List<Bitmap>,
+        shortlist: List<PhotoItem>,
+        bookCount: Int,
+        correction: String? = null,
+    ): JudgeResult =
         withContext(Dispatchers.IO) {
             val apiKey = BuildConfig.ANTHROPIC_API_KEY
             require(apiKey.isNotBlank()) { "ANTHROPIC_API_KEY missing from local.properties" }
@@ -28,8 +36,10 @@ object Judge {
                 You are choosing photos for a printed monthly family photobook.
                 The attached contact sheets show ${shortlist.size} candidate photos. Each photo is
                 labeled [index] with its date and detected face count.
-                Choose EXACTLY 20 photos. Build a chronological arc across the month,
-                balance the people who appear, and never pick two photos of the same scene.
+                Choose EXACTLY $bookCount photos. Build a chronological arc across the month,
+                balance the people who appear. Never pick two photos of the same
+                scene/moment, and at most 2 photos from the same location or session
+                across the whole book — even with different people in them.
                 Include 2-4 non-people shots ONLY if they clearly add story (a place,
                 trip, event, or milestone); skip mundane food, objects, and receipts
                 unless visually exceptional.
@@ -38,7 +48,7 @@ object Judge {
                 names, events, relationships, or activities you cannot see.
                 Respond ONLY with JSON, no prose, in this exact shape:
                 {"title": "...", "cover_index": N, "selections": [{"index": N, "page": N, "caption": "..."}]}
-            """.trimIndent()
+            """.trimIndent() + (correction?.let { "\n\n$it" } ?: "")
 
             val content = JSONArray()
             sheets.forEach { sheet ->
@@ -84,10 +94,10 @@ object Judge {
             conn.disconnect()
             require(code in 200..299) { "Anthropic API error $code: ${responseText.take(400)}" }
 
-            parse(responseText, shortlist.size)
+            parse(responseText, shortlist.size, bookCount)
         }
 
-    private fun parse(responseText: String, candidateCount: Int): JudgeResult {
+    private fun parse(responseText: String, candidateCount: Int, bookCount: Int): JudgeResult {
         val root = JSONObject(responseText)
         val usage = root.getJSONObject("usage")
         val text = root.getJSONArray("content").let { blocks ->
@@ -108,10 +118,10 @@ object Judge {
             Selection(s.getInt("index"), s.optInt("page", i + 1), s.optString("caption", ""))
         }
 
-        // Validate: exactly 20 distinct in-range indexes
+        // Validate: exactly bookCount distinct in-range indexes
         val indexes = selections.map { it.index }
-        require(selections.size == 20) { "Judge returned ${selections.size} selections, expected 20" }
-        require(indexes.toSet().size == 20) { "Judge returned duplicate indexes" }
+        require(selections.size == bookCount) { "Judge returned ${selections.size} selections, expected $bookCount" }
+        require(indexes.toSet().size == bookCount) { "Judge returned duplicate indexes" }
         require(indexes.all { it in 0 until candidateCount }) {
             "Judge returned out-of-range index (candidates 0..${candidateCount - 1})"
         }

@@ -81,11 +81,34 @@ class PipelineRunner(private val context: Context) {
                 ContactSheet.render(context, shortlist)
             }
 
-            // 7. judge
+            // 7. judge (pool-scaled book size, one same-scene correction retry)
+            val bookCount = Judge.bookCount(shortlist.size)
+            var residualPairs = 0
             val judge = stageS("7 judge", { j: JudgeResult ->
-                "20 picks, ${j.inputTokens} in / ${j.outputTokens} out tokens"
+                "${j.selections.size} picks" +
+                    (if (residualPairs > 0) ", $residualPairs pairs still similar (accepted)" else "") +
+                    ", ${j.inputTokens} in / ${j.outputTokens} out tokens"
             }) {
-                Judge.judge(sheets, shortlist)
+                var result = Judge.judge(sheets, shortlist, bookCount)
+                val violations = sameScenePairs(result, shortlist)
+                if (violations.isNotEmpty()) {
+                    val correction = "IMPORTANT CORRECTION — your previous answer had these " +
+                        "problems, fix them while keeping everything else: " +
+                        violations.joinToString("; ") { (a, b) ->
+                            "picks $a and $b are the same scene — replace one of each pair"
+                        }
+                    val retry = Judge.judge(sheets, shortlist, bookCount, correction)
+                    // accept the retry either way; surface anything still similar
+                    residualPairs = sameScenePairs(retry, shortlist).size
+                    result = JudgeResult(
+                        title = retry.title,
+                        coverIndex = retry.coverIndex,
+                        selections = retry.selections,
+                        inputTokens = result.inputTokens + retry.inputTokens,
+                        outputTokens = result.outputTokens + retry.outputTokens,
+                    )
+                }
+                result
             }
 
             return PipelineResult(timings, shortlist, sheets, judge, null)
@@ -306,6 +329,29 @@ class PipelineRunner(private val context: Context) {
         var hash = 0L
         for (i in 0 until 64) if (gray[i] > mean) hash = hash or (1L shl i)
         return hash
+    }
+
+    /**
+     * Deterministic post-judge scene check: two picks violate same-scene diversity when
+     * taken within 6 hours of each other AND near-duplicate by aHash (Hamming <= 8,
+     * slightly looser than the burst threshold since these survived shortlist).
+     * Returns pairs of judge pick indexes (into the shortlist).
+     * TODO: aHash is the tonight-approximation; parity with iOS Vision feature prints
+     * comes via the MediaPipe image embedder later.
+     */
+    private fun sameScenePairs(result: JudgeResult, shortlist: List<PhotoItem>): List<Pair<Int, Int>> {
+        val pairs = mutableListOf<Pair<Int, Int>>()
+        val picks = result.selections.map { it.index }
+        for (i in picks.indices) {
+            for (j in i + 1 until picks.size) {
+                val a = shortlist[picks[i]]
+                val b = shortlist[picks[j]]
+                val within6h = kotlin.math.abs(a.takenAtMs - b.takenAtMs) <= 6 * 3600 * 1000L
+                val nearDup = java.lang.Long.bitCount(a.aHash xor b.aHash) <= 8
+                if (within6h && nearDup) pairs += picks[i] to picks[j]
+            }
+        }
+        return pairs
     }
 
     // MARK: stage 3 — burst dedup (within 90s AND aHash Hamming distance <= 5, keep best-scored)
