@@ -29,8 +29,13 @@ object Judge {
                 The attached contact sheets show ${shortlist.size} candidate photos. Each photo is
                 labeled [index] with its date and detected face count.
                 Choose EXACTLY 20 photos. Build a chronological arc across the month,
-                balance the people who appear, include 3-5 non-people shots (places,
-                food, details), and never pick two photos of the same scene.
+                balance the people who appear, and never pick two photos of the same scene.
+                Include 2-4 non-people shots ONLY if they clearly add story (a place,
+                trip, event, or milestone); skip mundane food, objects, and receipts
+                unless visually exceptional.
+                Never select documents, screenshots, paperwork, or text-heavy images.
+                Captions must state only what is visibly in the photo; never invent
+                names, events, relationships, or activities you cannot see.
                 Respond ONLY with JSON, no prose, in this exact shape:
                 {"title": "...", "cover_index": N, "selections": [{"index": N, "page": N, "caption": "..."}]}
             """.trimIndent()

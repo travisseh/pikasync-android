@@ -9,6 +9,8 @@ import android.util.Size
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.tasks.await
 import java.util.Calendar
 import kotlin.math.min
@@ -51,11 +53,13 @@ class PipelineRunner(private val context: Context) {
             }
             if (all.isEmpty()) return PipelineResult(timings, emptyList(), emptyList(), null, "No photos found for that month")
 
-            // 2. score (utility exclusion + ML Kit faces + Laplacian sharpness + aHash)
-            val scored = stageS("2 score", { l: List<PhotoItem> -> "${l.size} kept, ${all.size - l.size} utility dropped" }) {
+            // 2. score (utility exclusion + document gate + ML Kit faces + sharpness + aHash)
+            val scored = stageS("2 score", { r: ScoreResult ->
+                "${r.kept.size} kept, ${r.utilityDropped} utility + ${r.docsDropped} docs dropped"
+            }) {
                 score(all)
-            }
-            if (scored.isEmpty()) return PipelineResult(timings, emptyList(), emptyList(), null, "All photos excluded as utility images")
+            }.kept
+            if (scored.isEmpty()) return PipelineResult(timings, emptyList(), emptyList(), null, "All photos excluded as utility/document images")
 
             // 3. burst dedup
             val deduped = stage("3 burst dedup", { l: List<PhotoItem> -> "${scored.size} -> ${l.size}" }) {
@@ -110,9 +114,14 @@ class PipelineRunner(private val context: Context) {
                 MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
                 MediaStore.Images.Media.RELATIVE_PATH,
             ),
-            "${MediaStore.Images.Media.DATE_ADDED} >= ? AND ${MediaStore.Images.Media.DATE_ADDED} < ?",
-            arrayOf(startSec.toString(), endSec.toString()),
-            "${MediaStore.Images.Media.DATE_ADDED} ASC",
+            // month = when the photo was TAKEN (EXIF), falling back to DATE_ADDED
+            // for rows with no datetaken (synced/restored photos keep their real month)
+            "(${MediaStore.Images.Media.DATE_TAKEN} >= ? AND ${MediaStore.Images.Media.DATE_TAKEN} < ?) OR " +
+                "((${MediaStore.Images.Media.DATE_TAKEN} IS NULL OR ${MediaStore.Images.Media.DATE_TAKEN} = 0) AND " +
+                "${MediaStore.Images.Media.DATE_ADDED} >= ? AND ${MediaStore.Images.Media.DATE_ADDED} < ?)",
+            arrayOf(start.timeInMillis.toString(), end.timeInMillis.toString(),
+                    startSec.toString(), endSec.toString()),
+            "${MediaStore.Images.Media.DATE_TAKEN} ASC",
         )?.use { c ->
             val idCol = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
             val addedCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
@@ -137,20 +146,36 @@ class PipelineRunner(private val context: Context) {
 
     // MARK: stage 2 — score
 
-    private suspend fun score(items: List<PhotoItem>): List<PhotoItem> {
-        val kept = items.filter { p ->
+    data class ScoreResult(val kept: List<PhotoItem>, val utilityDropped: Int, val docsDropped: Int)
+
+    private suspend fun score(items: List<PhotoItem>): ScoreResult {
+        // cheap gate first: utility folders by MediaStore metadata (free)
+        val survivors = items.filter { p ->
             val hay = "${p.bucket} ${p.relativePath}".lowercase()
             utilityFolders.none { hay.contains(it) }
         }
+        val utilityDropped = items.size - survivors.size
+        var docsDropped = 0
+
         val detector = FaceDetection.getClient(
             FaceDetectorOptions.Builder()
                 .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
                 .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
                 .build()
         )
+        val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        val kept = mutableListOf<PhotoItem>()
         try {
-            for (p in kept) {
+            for (p in survivors) {
                 val bmp = loadThumb(p, 512) ?: continue
+                // document gate: catches camera photos of letters/receipts/whiteboards
+                // that folder exclusion can't see. Runs only on folder-gate survivors.
+                if (isDocument(textRecognizer, bmp)) {
+                    docsDropped++
+                    bmp.recycle()
+                    continue
+                }
+                kept += p
                 // faces
                 try {
                     val faces = detector.process(InputImage.fromBitmap(bmp, 0)).await()
@@ -174,8 +199,41 @@ class PipelineRunner(private val context: Context) {
             }
         } finally {
             detector.close()
+            textRecognizer.close()
         }
-        return kept
+        return ScoreResult(kept, utilityDropped, docsDropped)
+    }
+
+    /**
+     * Document signal from ML Kit text recognition on the already-decoded 512px bitmap.
+     * A photo is dropped as a document when:
+     *  - it has more than 8 text blocks AND their bounding boxes cover more than 15%
+     *    of the image area (letters, receipts, whiteboards), OR
+     *  - any single paragraph-like column: a block with 5+ lines whose bounding box
+     *    covers at least 8% of the image area (a dense letter body).
+     * Street signs and t-shirt logos stay: few blocks, tiny coverage, no dense column.
+     */
+    private suspend fun isDocument(
+        recognizer: com.google.mlkit.vision.text.TextRecognizer,
+        bmp: android.graphics.Bitmap,
+    ): Boolean {
+        return try {
+            val text = recognizer.process(InputImage.fromBitmap(bmp, 0)).await()
+            val imageArea = bmp.width.toDouble() * bmp.height
+            if (imageArea <= 0 || text.textBlocks.isEmpty()) return false
+            var coveredArea = 0.0
+            var denseColumn = false
+            for (block in text.textBlocks) {
+                val box = block.boundingBox ?: continue
+                val area = box.width().toDouble() * box.height()
+                coveredArea += area
+                if (block.lines.size >= 5 && area / imageArea >= 0.08) denseColumn = true
+            }
+            val coverage = (coveredArea / imageArea).coerceAtMost(1.0)
+            (text.textBlocks.size > 8 && coverage > 0.15) || denseColumn
+        } catch (_: Exception) {
+            false // text recognition is a best-effort gate; never drop a photo on failure
+        }
     }
 
     private fun loadThumb(p: PhotoItem, size: Int): Bitmap? = try {
