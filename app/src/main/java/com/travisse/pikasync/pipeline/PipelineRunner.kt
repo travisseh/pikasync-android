@@ -170,7 +170,7 @@ class PipelineRunner(private val context: Context) {
                 val bmp = loadThumb(p, 512) ?: continue
                 // document gate: catches camera photos of letters/receipts/whiteboards
                 // that folder exclusion can't see. Runs only on folder-gate survivors.
-                if (isDocument(textRecognizer, bmp)) {
+                if (isDocument(textRecognizer, bmp, p)) {
                     docsDropped++
                     bmp.recycle()
                     continue
@@ -207,15 +207,20 @@ class PipelineRunner(private val context: Context) {
     /**
      * Document signal from ML Kit text recognition on the already-decoded 512px bitmap.
      * A photo is dropped as a document when:
-     *  - it has more than 8 text blocks AND their bounding boxes cover more than 15%
-     *    of the image area (letters, receipts, whiteboards), OR
+     *  - it has 9+ text blocks covering more than 15% of the image area
+     *    (close-up receipts, whiteboards where text resolves large), OR
+     *  - it has 10+ text blocks covering at least 5% of the image area
+     *    (a full-page letter at 512px: only headline-size text resolves, as many
+     *    sparse one-line blocks — measured on a real IRS letter: 12 blocks, 6.2%
+     *    coverage, while no ordinary photo in the test set exceeded 2 blocks), OR
      *  - any single paragraph-like column: a block with 5+ lines whose bounding box
-     *    covers at least 8% of the image area (a dense letter body).
-     * Street signs and t-shirt logos stay: few blocks, tiny coverage, no dense column.
+     *    covers at least 8% of the image area (a dense readable letter body).
+     * Street signs and t-shirt logos stay: 1-2 blocks, tiny coverage, no dense column.
      */
     private suspend fun isDocument(
         recognizer: com.google.mlkit.vision.text.TextRecognizer,
         bmp: android.graphics.Bitmap,
+        p: PhotoItem,
     ): Boolean {
         return try {
             val text = recognizer.process(InputImage.fromBitmap(bmp, 0)).await()
@@ -223,15 +228,29 @@ class PipelineRunner(private val context: Context) {
             if (imageArea <= 0 || text.textBlocks.isEmpty()) return false
             var coveredArea = 0.0
             var denseColumn = false
+            val lineCounts = mutableListOf<Int>()
             for (block in text.textBlocks) {
                 val box = block.boundingBox ?: continue
                 val area = box.width().toDouble() * box.height()
                 coveredArea += area
+                lineCounts += block.lines.size
                 if (block.lines.size >= 5 && area / imageArea >= 0.08) denseColumn = true
             }
             val coverage = (coveredArea / imageArea).coerceAtMost(1.0)
-            (text.textBlocks.size > 8 && coverage > 0.15) || denseColumn
-        } catch (_: Exception) {
+            val blocks = text.textBlocks.size
+            val doc = (blocks >= 9 && coverage > 0.15) ||
+                (blocks >= 10 && coverage >= 0.05) ||
+                denseColumn
+            if (doc) {
+                android.util.Log.d(
+                    "DocGate",
+                    "id=${p.id} DROP blocks=$blocks lines=$lineCounts " +
+                        "coverage=${"%.3f".format(coverage)} dense=$denseColumn"
+                )
+            }
+            doc
+        } catch (e: Exception) {
+            android.util.Log.e("DocGate", "id=${p.id} recognizer FAILED: $e")
             false // text recognition is a best-effort gate; never drop a photo on failure
         }
     }
