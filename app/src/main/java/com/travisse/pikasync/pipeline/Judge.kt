@@ -2,123 +2,104 @@ package com.travisse.pikasync.pipeline
 
 import android.graphics.Bitmap
 import android.util.Base64
-import com.travisse.pikasync.BuildConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Stage 7: POST contact sheets to the Anthropic Messages API and have
- * claude-sonnet-5 pick a pool-scaled number of photos for the monthly book.
+ * Stage 7: POST contact sheets to the pikasync judge server, which holds the
+ * Anthropic key and owns the judge prompt (captionless since round 3). The
+ * device uploads sheets only — no API key on the device.
  */
 object Judge {
-    private const val MODEL = "claude-sonnet-5"
-    private const val ENDPOINT = "https://api.anthropic.com/v1/messages"
+    private const val ENDPOINT = "https://pikasync-judge.vercel.app/api/judge"
 
-    /** Never ask for a book the shortlist can't support: ~5/12 of the pool, clamped to 8..20. */
+    /** Pool-scaled sizing: ~5/12 of the pool, clamped to 8..20 (further capped by sessions/scenes in the runner). */
     fun bookCount(shortlistSize: Int): Int = minOf(20, maxOf(8, shortlistSize * 5 / 12))
+
+    /**
+     * Vercel rejects request bodies over 4.5MB; step JPEG quality down until the
+     * combined base64 payload fits with headroom.
+     */
+    private fun encodeSheets(sheets: List<Bitmap>): List<String> {
+        for (quality in intArrayOf(70, 50, 35)) {
+            val encoded = sheets.map { sheet ->
+                val jpeg = ByteArrayOutputStream().also {
+                    sheet.compress(Bitmap.CompressFormat.JPEG, quality, it)
+                }.toByteArray()
+                Base64.encodeToString(jpeg, Base64.NO_WRAP)
+            }
+            if (encoded.sumOf { it.length } < 3_800_000) return encoded
+        }
+        return sheets.map { sheet ->
+            val jpeg = ByteArrayOutputStream().also {
+                sheet.compress(Bitmap.CompressFormat.JPEG, 25, it)
+            }.toByteArray()
+            Base64.encodeToString(jpeg, Base64.NO_WRAP)
+        }
+    }
 
     suspend fun judge(
         sheets: List<Bitmap>,
         shortlist: List<PhotoItem>,
         bookCount: Int,
+        monthLabel: String,
         correction: String? = null,
     ): JudgeResult =
         withContext(Dispatchers.IO) {
-            val apiKey = BuildConfig.ANTHROPIC_API_KEY
-            require(apiKey.isNotBlank()) { "ANTHROPIC_API_KEY missing from local.properties" }
-
-            val prompt = """
-                You are choosing photos for a printed monthly family photobook.
-                The attached contact sheets show ${shortlist.size} candidate photos. Each photo is
-                labeled [index] with its date and detected face count.
-                Choose EXACTLY $bookCount photos. Build a chronological arc across the month,
-                balance the people who appear. Never pick two photos of the same
-                scene/moment, and at most 2 photos from the same location or session
-                across the whole book — even with different people in them.
-                Include 2-4 non-people shots ONLY if they clearly add story (a place,
-                trip, event, or milestone); skip mundane food, objects, and receipts
-                unless visually exceptional.
-                Never select documents, screenshots, paperwork, or text-heavy images.
-                Captions must state only what is visibly in the photo; never invent
-                names, events, relationships, or activities you cannot see.
-                Respond ONLY with JSON, no prose, in this exact shape:
-                {"title": "...", "cover_index": N, "selections": [{"index": N, "page": N, "caption": "..."}]}
-            """.trimIndent() + (correction?.let { "\n\n$it" } ?: "")
-
-            val content = JSONArray()
-            sheets.forEach { sheet ->
-                val jpeg = ByteArrayOutputStream().also {
-                    sheet.compress(Bitmap.CompressFormat.JPEG, 70, it)
-                }.toByteArray()
-                content.put(JSONObject().apply {
-                    put("type", "image")
-                    put("source", JSONObject().apply {
-                        put("type", "base64")
-                        put("media_type", "image/jpeg")
-                        put("data", Base64.encodeToString(jpeg, Base64.NO_WRAP))
-                    })
-                })
-            }
-            content.put(JSONObject().apply {
-                put("type", "text")
-                put("text", prompt)
-            })
-
             val body = JSONObject().apply {
-                put("model", MODEL)
-                put("max_tokens", 4000)
-                put("messages", JSONArray().put(JSONObject().apply {
-                    put("role", "user")
-                    put("content", content)
-                }))
+                put("monthLabel", monthLabel)
+                put("count", bookCount)
+                put("maxIndex", shortlist.size - 1)
+                correction?.let { put("correction", it) }
+                put("sheets", JSONArray(encodeSheets(sheets)))
+            }.toString().toByteArray()
+
+            // Phones intermittently drop large uploads mid-flight; retry with a
+            // fresh connection, matching the iOS client.
+            var lastError: Exception? = null
+            for (attempt in 1..3) {
+                try {
+                    return@withContext post(body, shortlist.size, bookCount)
+                } catch (e: IOException) {
+                    lastError = e
+                    if (attempt < 3) delay(2000)
+                }
             }
-
-            val conn = URL(ENDPOINT).openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.doOutput = true
-            conn.connectTimeout = 30_000
-            conn.readTimeout = 180_000
-            conn.setRequestProperty("content-type", "application/json")
-            conn.setRequestProperty("x-api-key", apiKey)
-            conn.setRequestProperty("anthropic-version", "2023-06-01")
-            conn.outputStream.use { it.write(body.toString().toByteArray()) }
-
-            val code = conn.responseCode
-            val responseText = (if (code in 200..299) conn.inputStream else conn.errorStream)
-                ?.bufferedReader()?.readText() ?: ""
-            conn.disconnect()
-            require(code in 200..299) { "Anthropic API error $code: ${responseText.take(400)}" }
-
-            parse(responseText, shortlist.size, bookCount)
+            throw lastError ?: IOException("judge request never attempted")
         }
 
-    private fun parse(responseText: String, candidateCount: Int, bookCount: Int): JudgeResult {
+    private fun post(body: ByteArray, candidateCount: Int, bookCount: Int): JudgeResult {
+        val conn = URL(ENDPOINT).openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.doOutput = true
+        conn.connectTimeout = 30_000
+        conn.readTimeout = 290_000
+        conn.setRequestProperty("content-type", "application/json")
+        conn.outputStream.use { it.write(body) }
+
+        val code = conn.responseCode
+        val responseText = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.readText() ?: ""
+        conn.disconnect()
+        require(code in 200..299) { "judge server $code: ${responseText.take(400)}" }
+
         val root = JSONObject(responseText)
-        val usage = root.getJSONObject("usage")
-        val text = root.getJSONArray("content").let { blocks ->
-            (0 until blocks.length())
-                .map { blocks.getJSONObject(it) }
-                .firstOrNull { it.getString("type") == "text" }
-                ?.getString("text") ?: ""
-        }
-        // model was told JSON-only, but strip code fences defensively
-        val json = text.trim()
-            .removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
-            .let { it.substring(it.indexOf('{')) } // tolerate leading prose
-
-        val parsed = JSONObject(json)
-        val selectionsArr = parsed.getJSONArray("selections")
+        val book = root.getJSONObject("book")
+        val usage = root.optJSONObject("usage") ?: JSONObject()
+        val selectionsArr = book.getJSONArray("selections")
         val selections = (0 until selectionsArr.length()).map { i ->
             val s = selectionsArr.getJSONObject(i)
-            Selection(s.getInt("index"), s.optInt("page", i + 1), s.optString("caption", ""))
+            Selection(s.getInt("index"), s.optInt("page", i + 1))
         }
 
-        // Validate: exactly bookCount distinct in-range indexes
+        // The server validates too; keep the client-side checks as a belt-and-suspenders.
         val indexes = selections.map { it.index }
         require(selections.size == bookCount) { "Judge returned ${selections.size} selections, expected $bookCount" }
         require(indexes.toSet().size == bookCount) { "Judge returned duplicate indexes" }
@@ -127,8 +108,8 @@ object Judge {
         }
 
         return JudgeResult(
-            title = parsed.optString("title", "Untitled Month"),
-            coverIndex = parsed.optInt("cover_index", indexes.first()),
+            title = book.optString("title", "Untitled Month"),
+            coverIndex = book.optInt("cover_index", indexes.first()),
             selections = selections.sortedBy { it.page },
             inputTokens = usage.optInt("input_tokens", 0),
             outputTokens = usage.optInt("output_tokens", 0),

@@ -10,6 +10,13 @@ import kotlinx.coroutines.withContext
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         SyncEngine.runSync(applicationContext, "work_periodic")
+        // Once per calendar month: generate last month's book in the background
+        // (marker set only on success inside, so failures retry next wake).
+        try {
+            AutoBook.generateIfDue(applicationContext)
+        } catch (e: Exception) {
+            WakeLog.record(applicationContext, "bg_book", -1, -1, "crashed: ${e.toString().take(120)}")
+        }
         Result.success()
     }
 }

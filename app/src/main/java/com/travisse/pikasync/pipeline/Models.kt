@@ -18,7 +18,7 @@ data class PhotoItem(
 
 data class StageTiming(val name: String, val ms: Long, val detail: String)
 
-data class Selection(val index: Int, val page: Int, val caption: String)
+data class Selection(val index: Int, val page: Int)
 
 data class JudgeResult(
     val title: String,

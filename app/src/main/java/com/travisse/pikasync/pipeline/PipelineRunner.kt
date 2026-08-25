@@ -12,6 +12,7 @@ import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.tasks.await
+import java.text.SimpleDateFormat
 import java.util.Calendar
 import kotlin.math.min
 
@@ -26,6 +27,25 @@ class PipelineRunner(private val context: Context) {
     suspend fun run(
         year: Int,
         month: Int, // 1-12
+        trigger: String = "manual",
+        onStage: (StageTiming) -> Unit,
+    ): PipelineResult {
+        val monthKey = String.format(java.util.Locale.US, "%04d-%02d", year, month)
+        val result = runInner(year, month, onStage)
+        RunStatusLog.write(
+            context,
+            month = monthKey,
+            status = if (result.error == null) "done — ${result.judge?.selections?.size ?: 0}-photo book ready" else "failed",
+            error = result.error,
+            stages = result.timings.map { "${it.name}: ${it.detail} (${it.ms}ms)" },
+            trigger = trigger,
+        )
+        return result
+    }
+
+    private suspend fun runInner(
+        year: Int,
+        month: Int,
         onStage: (StageTiming) -> Unit,
     ): PipelineResult {
         val timings = mutableListOf<StageTiming>()
@@ -72,8 +92,22 @@ class PipelineRunner(private val context: Context) {
             }
 
             // 5. coverage shortlist of 48
-            val shortlist = stage("5 shortlist", { l: List<PhotoItem> -> "${l.size} picked (per-week floors, 7 no-face seats)" }) {
+            val rawShortlist = stage("5 shortlist", { l: List<PhotoItem> -> "${l.size} picked (per-week floors, 7 no-face seats)" }) {
                 shortlist(ranked)
+            }
+
+            // 5b. pre-judge scene collapse: cluster the shortlist by scene and pass at
+            // most 3 representatives per cluster, so the judge can never be forced to
+            // pick near-duplicates (round-3 fix; this alone fixed May on iOS/Mac).
+            var sceneClusterCount = 0
+            val shortlist = stage("5b scene collapse", { l: List<PhotoItem> ->
+                "${rawShortlist.size - l.size} scene-collapsed, $sceneClusterCount scenes"
+            }) {
+                val clusters = sceneClusters(rawShortlist)
+                sceneClusterCount = clusters.size
+                clusters.flatMap { idxs ->
+                    idxs.map { rawShortlist[it] }.sortedByDescending { it.score }.take(3)
+                }.sortedBy { it.takenAtMs }
             }
 
             // 6. contact sheets
@@ -81,23 +115,35 @@ class PipelineRunner(private val context: Context) {
                 ContactSheet.render(context, shortlist)
             }
 
-            // 7. judge (pool-scaled book size, one same-scene correction retry)
-            val bookCount = Judge.bookCount(shortlist.size)
+            // 7. judge — book size capped by sessions and distinct scenes so thin
+            // months shrink instead of padding with duplicates (iOS formula).
+            val sessions = sessionCount(shortlist)
+            val bookCount = maxOf(4, minOf(Judge.bookCount(shortlist.size), maxOf(6, 2 * sessions), sceneClusterCount))
+            val monthLabel = SimpleDateFormat("MMMM yyyy", java.util.Locale.US)
+                .format(Calendar.getInstance().apply { set(year, month - 1, 1) }.time)
             var residualPairs = 0
             val judge = stageS("7 judge", { j: JudgeResult ->
                 "${j.selections.size} picks" +
-                    (if (residualPairs > 0) ", $residualPairs pairs still similar (accepted)" else "") +
+                    (when (residualPairs) {
+                        0 -> ""
+                        1 -> ", 1 residual pair (tolerated — likely major event)"
+                        else -> ", $residualPairs pairs still similar (accepted)"
+                    }) +
                     ", ${j.inputTokens} in / ${j.outputTokens} out tokens"
             }) {
-                var result = Judge.judge(sheets, shortlist, bookCount)
+                var result = Judge.judge(sheets, shortlist, bookCount, monthLabel)
                 val violations = sameScenePairs(result, shortlist)
-                if (violations.isNotEmpty()) {
+                residualPairs = violations.size
+                // One residual pair is tolerated: major events (birthday, big trip)
+                // legitimately carry a second page of the same session. Retry only
+                // when the book has 2+ same-scene pairs.
+                if (violations.size >= 2) {
                     val correction = "IMPORTANT CORRECTION — your previous answer had these " +
                         "problems, fix them while keeping everything else: " +
                         violations.joinToString("; ") { (a, b) ->
                             "picks $a and $b are the same scene — replace one of each pair"
                         }
-                    val retry = Judge.judge(sheets, shortlist, bookCount, correction)
+                    val retry = Judge.judge(sheets, shortlist, bookCount, monthLabel, correction)
                     // accept the retry either way; surface anything still similar
                     residualPairs = sameScenePairs(retry, shortlist).size
                     result = JudgeResult(
@@ -352,6 +398,57 @@ class PipelineRunner(private val context: Context) {
             }
         }
         return pairs
+    }
+
+    /**
+     * Union-find scene clusters over the shortlist: same cluster when photos are
+     * within 6 hours AND near-duplicate by aHash (Hamming <= 8 — same signal as
+     * the post-judge residual check). Mirror of the iOS sceneClusters().
+     */
+    private fun sceneClusters(photos: List<PhotoItem>): List<List<Int>> {
+        val parent = IntArray(photos.size) { it }
+        fun find(i: Int): Int {
+            var x = i
+            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x] }
+            return x
+        }
+        for (i in photos.indices) {
+            for (j in i + 1 until photos.size) {
+                val within6h = kotlin.math.abs(photos[i].takenAtMs - photos[j].takenAtMs) <= 6 * 3600 * 1000L
+                val nearDup = java.lang.Long.bitCount(photos[i].aHash xor photos[j].aHash) <= 8
+                if (within6h && nearDup) parent[find(j)] = find(i)
+            }
+        }
+        return photos.indices.groupBy { find(it) }.values.toList()
+    }
+
+    /**
+     * Sessions: 3h time-gap clusters, merged when any cross-session pair is
+     * scene-similar (a two-location day still counts its outings separately,
+     * but a resumed session at the same place merges). Mirror of iOS sessionCount().
+     */
+    private fun sessionCount(photos: List<PhotoItem>): Int {
+        if (photos.isEmpty()) return 0
+        val sorted = photos.sortedBy { it.takenAtMs }
+        val sessions = mutableListOf<MutableList<PhotoItem>>()
+        for (p in sorted) {
+            val last = sessions.lastOrNull()
+            if (last != null && p.takenAtMs - last.last().takenAtMs <= 3 * 3600 * 1000L) last.add(p)
+            else sessions.add(mutableListOf(p))
+        }
+        // merge sessions that clearly share a scene
+        val merged = mutableListOf<MutableList<PhotoItem>>()
+        outer@ for (s in sessions) {
+            for (m in merged) {
+                for (a in m) for (b in s) {
+                    if (java.lang.Long.bitCount(a.aHash xor b.aHash) <= 8) {
+                        m.addAll(s); continue@outer
+                    }
+                }
+            }
+            merged.add(s)
+        }
+        return merged.size
     }
 
     // MARK: stage 3 — burst dedup (within 90s AND aHash Hamming distance <= 5, keep best-scored)

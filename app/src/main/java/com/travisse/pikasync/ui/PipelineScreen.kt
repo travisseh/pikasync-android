@@ -134,7 +134,7 @@ fun PipelineScreen() {
     }
 }
 
-/** Stage 8: book viewer. Page 0 is the cover; then the 20 picks with captions. */
+/** Stage 8: book viewer. Page 0 is the cover; then the picks in page order. */
 @Composable
 private fun BookViewer(result: PipelineResult, onClose: () -> Unit) {
     val judge = result.judge ?: return
@@ -174,13 +174,13 @@ private fun BookViewer(result: PipelineResult, onClose: () -> Unit) {
                     if (photo != null) {
                         AsyncImage(
                             model = photo.uri,
-                            contentDescription = sel.caption,
+                            contentDescription = "page ${sel.page}",
                             modifier = Modifier.fillMaxWidth().weight(1f),
                             contentScale = ContentScale.Fit,
                         )
                     }
                     Text(
-                        "${sel.page}. ${sel.caption}",
+                        "page ${sel.page}",
                         color = Color.White,
                         textAlign = TextAlign.Center,
                         modifier = Modifier.fillMaxWidth().padding(12.dp),
