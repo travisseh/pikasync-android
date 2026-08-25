@@ -33,7 +33,10 @@ class PipelineRunner(private val context: Context) {
         val monthKey = String.format(java.util.Locale.US, "%04d-%02d", year, month)
         val result = runInner(year, month, onStage)
         if (result.error == null) {
-            RunStore.fromResult(year, month, result, trigger)?.let { RunStore.add(context, it) }
+            RunStore.fromResult(year, month, result, trigger)?.let { run ->
+                RunStore.add(context, run)
+                autoShare(run, onStage)
+            }
         }
         RunStatusLog.write(
             context,
@@ -44,6 +47,23 @@ class PipelineRunner(private val context: Context) {
             trigger = trigger,
         )
         return result
+    }
+
+    /**
+     * Auto-share every finished book so it's immediately feedback-able
+     * (interactive and background paths both come through run()). Best-effort:
+     * on failure the run is marked needsShare and retried on next app open.
+     */
+    private suspend fun autoShare(run: SavedRun, onStage: (StageTiming) -> Unit) {
+        val t0 = System.currentTimeMillis()
+        try {
+            val share = ShareClient.upload(context, run)
+            RunStore.update(context, run.copy(shareId = share.shareId, shareUrl = share.url, needsShare = false))
+            onStage(StageTiming("8 share", System.currentTimeMillis() - t0, share.url))
+        } catch (e: Exception) {
+            RunStore.update(context, run.copy(needsShare = true))
+            onStage(StageTiming("8 share", System.currentTimeMillis() - t0, "share failed (will retry): ${e.message?.take(80)}"))
+        }
     }
 
     private suspend fun runInner(

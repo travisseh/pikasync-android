@@ -23,6 +23,10 @@ data class SavedRun(
     val selections: List<SavedSelection>,
     val judgeInfo: String,
     val trigger: String,
+    val stages: List<StageTiming> = emptyList(),
+    val shareId: String? = null,
+    val shareUrl: String? = null,
+    val needsShare: Boolean = false,  // auto-share failed; retry on next app open
 )
 
 object RunStore {
@@ -37,6 +41,7 @@ object RunStore {
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
                 val sels = o.getJSONArray("selections")
+                val stagesArr = o.optJSONArray("stages") ?: JSONArray()
                 SavedRun(
                     id = o.getString("id"),
                     createdAt = o.getLong("createdAt"),
@@ -50,6 +55,13 @@ object RunStore {
                     },
                     judgeInfo = o.optString("judgeInfo"),
                     trigger = o.optString("trigger", "manual"),
+                    stages = (0 until stagesArr.length()).map { j ->
+                        val s = stagesArr.getJSONObject(j)
+                        StageTiming(s.getString("name"), s.getLong("ms"), s.optString("detail"))
+                    },
+                    shareId = o.optString("shareId").ifEmpty { null },
+                    shareUrl = o.optString("shareUrl").ifEmpty { null },
+                    needsShare = o.optBoolean("needsShare", false),
                 )
             }
         } catch (_: Exception) {
@@ -60,6 +72,12 @@ object RunStore {
     @Synchronized
     fun add(context: Context, run: SavedRun) {
         save(context, listOf(run) + load(context))
+    }
+
+    /** Replace the stored run with the same id (share info, retry flags). */
+    @Synchronized
+    fun update(context: Context, run: SavedRun) {
+        save(context, load(context).map { if (it.id == run.id) run else it })
     }
 
     @Synchronized
@@ -74,6 +92,10 @@ object RunStore {
             r.selections.forEach { s ->
                 sels.put(JSONObject().put("uri", s.uri).put("page", s.page))
             }
+            val stages = JSONArray()
+            r.stages.forEach { t ->
+                stages.put(JSONObject().put("name", t.name).put("ms", t.ms).put("detail", t.detail))
+            }
             arr.put(
                 JSONObject()
                     .put("id", r.id)
@@ -85,6 +107,10 @@ object RunStore {
                     .put("selections", sels)
                     .put("judgeInfo", r.judgeInfo)
                     .put("trigger", r.trigger)
+                    .put("stages", stages)
+                    .put("shareId", r.shareId ?: "")
+                    .put("shareUrl", r.shareUrl ?: "")
+                    .put("needsShare", r.needsShare)
             )
         }
         val tmp = File(context.filesDir, "saved-runs.json.tmp")
@@ -115,6 +141,7 @@ object RunStore {
             selections = sels,
             judgeInfo = "${judge.inputTokens} in / ${judge.outputTokens} out tokens",
             trigger = trigger,
+            stages = result.timings,
         )
     }
 }
