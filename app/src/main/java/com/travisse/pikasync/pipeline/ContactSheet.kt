@@ -50,7 +50,17 @@ object ContactSheet {
                     canvas.drawBitmap(thumb, src, Rect(x, y, x + CELL, y + CELL), null)
                     thumb.recycle()
                 }
-                val label = "[$index] ${fmt.format(Date(photo.takenAtMs))} faces:${photo.faceCount}"
+                // Known names on the label steer the judge's starred-name
+                // balance rule (mirror of iOS: skip auto "Person N" names).
+                val names = photo.personIds
+                    .mapNotNull { PeopleStore.nameOf(context, it) }
+                    .filter { !it.startsWith("Person ") }
+                    .take(2).joinToString(",")
+                var label = "[$index] ${fmt.format(Date(photo.takenAtMs))} faces:${photo.faceCount}"
+                if (names.isNotEmpty()) {
+                    label += " $names"
+                    android.util.Log.d("SheetLabel", label)
+                }
                 canvas.drawText(label, x + CELL / 2f, y + CELL + LABEL_H * 0.65f, textPaint)
                 index++
             }

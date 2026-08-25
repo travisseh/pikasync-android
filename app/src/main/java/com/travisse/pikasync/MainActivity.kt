@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -45,7 +46,7 @@ import com.travisse.pikasync.ui.Pika
 import com.travisse.pikasync.ui.PikaTheme
 import com.travisse.pikasync.ui.SyncScreen
 
-private enum class Tab { Books, Sync }
+private enum class Tab { Books, People, Sync }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,6 +101,13 @@ private fun Root() {
                     colors = navColors(),
                 )
                 NavigationBarItem(
+                    selected = tab == Tab.People,
+                    onClick = { tab = Tab.People },
+                    icon = { Icon(Icons.Outlined.Person, "People") },
+                    label = { Text("People") },
+                    colors = navColors(),
+                )
+                NavigationBarItem(
                     selected = tab == Tab.Sync,
                     onClick = { tab = Tab.Sync },
                     icon = { Icon(Icons.Outlined.Refresh, "Sync") },
@@ -138,6 +146,7 @@ private fun Root() {
                         onOpenBook = { openBook = it },
                         onCreate = { showCreate = true },
                     )
+                    Tab.People -> com.travisse.pikasync.ui.PeopleScreen()
                     Tab.Sync -> SyncScreen(onClose = { tab = Tab.Books })
                 }
             }

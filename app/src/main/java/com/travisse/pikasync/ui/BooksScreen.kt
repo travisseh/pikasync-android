@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.travisse.pikasync.pipeline.SavedRun
+import kotlinx.coroutines.launch
 
 /** Home: image-forward gallery of saved books, with a live entry while one is being made. */
 @Composable
@@ -59,6 +60,8 @@ fun BooksScreen(
         ) {
             item { Text("Your books", style = Pika.Headline, modifier = Modifier.padding(top = 4.dp)) }
 
+            item { FindPeopleCard() }
+
             if (creatorJob != null) {
                 item { CreatingCard(creatorJob) { showProgress = true } }
             }
@@ -73,6 +76,50 @@ fun BooksScreen(
 
     if (showProgress && creatorJob != null) {
         ProgressSheet(creatorJob, onDismiss = { showProgress = false })
+    }
+}
+
+/** Onboarding: shown until the first people scan has run — books are built around starred family. */
+@Composable
+private fun FindPeopleCard() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val version = com.travisse.pikasync.pipeline.PeopleScanner.peopleVersion
+    val hasPeople = remember(version) {
+        com.travisse.pikasync.pipeline.PeopleStore.load(context).isNotEmpty() ||
+            com.travisse.pikasync.pipeline.PeopleScanner.hasScanned(context)
+    }
+    if (hasPeople) return
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(Pika.CardShape)
+            .background(Pika.Section)
+            .padding(18.dp)
+    ) {
+        Text("Find your people", style = Pika.Title)
+        Text(
+            "Pikabook scans your last 6 months of photos to learn who your books are about. You name and star your family once — every book uses it.",
+            style = Pika.Caption, modifier = Modifier.padding(top = 6.dp), lineHeight = 18.sp,
+        )
+        Spacer(Modifier.height(14.dp))
+        if (com.travisse.pikasync.pipeline.PeopleScanner.scanning) {
+            androidx.compose.material3.LinearProgressIndicator(
+                progress = { com.travisse.pikasync.pipeline.PeopleScanner.progress.toFloat() },
+                modifier = Modifier.fillMaxWidth(), color = Pika.Coral,
+            )
+            Text(
+                com.travisse.pikasync.pipeline.PeopleScanner.statusText,
+                style = Pika.Caption, modifier = Modifier.padding(top = 8.dp),
+            )
+        } else {
+            PillButton("Scan my photos") {
+                scope.launch {
+                    com.travisse.pikasync.pipeline.PeopleScanner.scan(context)
+                    com.travisse.pikasync.pipeline.PeopleScanner.notifyPeopleChanged()
+                }
+            }
+        }
     }
 }
 

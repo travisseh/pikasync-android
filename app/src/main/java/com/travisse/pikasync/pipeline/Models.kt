@@ -14,6 +14,7 @@ data class PhotoItem(
     var sharpness: Double = 0.0,   // Laplacian variance on downscaled grayscale
     var aHash: Long = 0L,          // 8x8 average hash for burst dedup
     var score: Double = 0.0,       // composite, set at rank stage
+    var personIds: Set<String> = emptySet(), // PeopleStore cluster ids of eligible faces
 )
 
 data class StageTiming(val name: String, val ms: Long, val detail: String)

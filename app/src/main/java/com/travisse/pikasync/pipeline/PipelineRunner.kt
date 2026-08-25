@@ -96,13 +96,23 @@ class PipelineRunner(private val context: Context) {
             }
             if (all.isEmpty()) return PipelineResult(timings, emptyList(), emptyList(), null, "No photos found for that month")
 
-            // 2. score (utility exclusion + document gate + ML Kit faces + sharpness + aHash)
+            // 2. score (utility exclusion + document gate + ML Kit faces + identity + sharpness + aHash)
+            val excludedIds = PeopleStore.excludedIds(context)
+            var excludedDropped = 0
             val scored = stageS("2 score", { r: ScoreResult ->
-                "${r.kept.size} kept, ${r.utilityDropped} utility + ${r.docsDropped} docs dropped"
+                "${r.kept.size} kept, ${r.utilityDropped} utility + ${r.docsDropped} docs + $excludedDropped excluded-person dropped"
             }) {
-                score(all)
+                val r = score(all)
+                // excluded-people drop (mirror of iOS gate stage)
+                val kept = r.kept.filter { p ->
+                    val hit = p.personIds.any(excludedIds::contains)
+                    if (hit) excludedDropped++
+                    !hit
+                }
+                ScoreResult(kept, r.utilityDropped, r.docsDropped)
             }.kept
             if (scored.isEmpty()) return PipelineResult(timings, emptyList(), emptyList(), null, "All photos excluded as utility/document images")
+            PeopleStore.save(context)  // persist centroid updates from the identity pass
 
             // 3. burst dedup
             val deduped = stage("3 burst dedup", { l: List<PhotoItem> -> "${scored.size} -> ${l.size}" }) {
@@ -115,7 +125,13 @@ class PipelineRunner(private val context: Context) {
             }
 
             // 5. coverage shortlist of 48
-            val rawShortlist = stage("5 shortlist", { l: List<PhotoItem> -> "${l.size} picked (per-week floors, 7 no-face seats)" }) {
+            val starredCount = PeopleStore.requiredIds(context).size
+            val rawShortlist = stage("5 shortlist", { l: List<PhotoItem> ->
+                val strangers = ranked.size - l.size
+                "${l.size} picked" +
+                    (if (starredCount > 0) " ($strangers strangers/rank dropped, $starredCount starred people active)"
+                     else " (per-week floors, 7 no-face seats)")
+            }) {
                 shortlist(ranked)
             }
 
@@ -255,6 +271,13 @@ class PipelineRunner(private val context: Context) {
                 .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
                 .build()
         )
+        // second detector with landmarks for the identity-embedding pass
+        val landmarkDetector = FaceDetection.getClient(
+            FaceDetectorOptions.Builder()
+                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+                .build()
+        )
         val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         val kept = mutableListOf<PhotoItem>()
         try {
@@ -283,6 +306,26 @@ class PipelineRunner(private val context: Context) {
                         p.faceQuality = (0.85 * perFace + 0.15 * min(faces.size, 3) / 3.0).coerceIn(0.0, 1.0)
                     }
                 } catch (_: Exception) { /* face scoring is best-effort */ }
+                // face IDENTITY: embed eligible faces on a 900px decode and assign
+                // to PeopleStore clusters (auto-creates clusters for new people,
+                // exactly like iOS IncrementalScorer). Best-effort.
+                if (p.faceCount > 0) {
+                    try {
+                        val big = loadThumb(p, 900)
+                        if (big != null) {
+                            val faces = landmarkDetector.process(InputImage.fromBitmap(big, 0)).await()
+                            val ids = mutableSetOf<String>()
+                            for (f in faces.filter { FaceEmbedder.eligible(it, big.width) }.take(6)) {
+                                val crop = FaceEmbedder.alignedCrop(big, f) ?: continue
+                                val emb = FaceEmbedder.embed(context, crop)
+                                crop.recycle()
+                                if (emb != null) ids += PeopleStore.assign(context, emb, null)
+                            }
+                            p.personIds = ids
+                            big.recycle()
+                        }
+                    } catch (_: Exception) { /* identity is best-effort */ }
+                }
                 // sharpness + aHash on grayscale downscales
                 val gray = grayscale(bmp, 128)
                 p.sharpness = laplacianVariance(gray.first, gray.second, gray.third)
@@ -291,6 +334,7 @@ class PipelineRunner(private val context: Context) {
             }
         } finally {
             detector.close()
+            landmarkDetector.close()
             textRecognizer.close()
         }
         return ScoreResult(kept, utilityDropped, docsDropped)
@@ -512,10 +556,18 @@ class PipelineRunner(private val context: Context) {
 
     private fun shortlist(ranked: List<PhotoItem>): List<PhotoItem> {
         val target = 48
-        if (ranked.size <= target) return ranked.sortedBy { it.takenAtMs }
+
+        // When the book is "about" starred people, face-photos whose detected
+        // people include NONE of the starred ones are strangers — drop them.
+        // (Photos with no eligible faces still qualify as texture shots.)
+        val required = PeopleStore.requiredIds(context)
+        val pool = if (required.isEmpty()) ranked else ranked.filter { p ->
+            p.personIds.isEmpty() || p.personIds.any(required::contains)
+        }
+        if (pool.size <= target) return pool.sortedBy { it.takenAtMs }
 
         val picked = LinkedHashSet<PhotoItem>()
-        val byWeek = ranked.groupBy { p ->
+        val byWeek = pool.groupBy { p ->
             Calendar.getInstance().apply { timeInMillis = p.takenAtMs }.get(Calendar.WEEK_OF_YEAR)
         }
         // per-week floor so no week of the month goes unrepresented
@@ -524,11 +576,33 @@ class PipelineRunner(private val context: Context) {
             weekPhotos.sortedByDescending { it.score }.take(floor).forEach { picked.add(it) }
         }
         // 7 protected seats for the best no-face shots (scenery, food, places)
-        ranked.filter { it.faceCount == 0 && it !in picked }
+        pool.filter { it.faceCount == 0 && it !in picked }
             .take(7 - picked.count { it.faceCount == 0 }.coerceAtMost(7))
             .forEach { picked.add(it) }
-        // fill the remainder by global score
-        for (p in ranked) {
+        // required-people guarantee: each starred person gets >=3 shortlist seats
+        for (pid in required) {
+            var have = picked.count { it.personIds.contains(pid) }
+            for (p in pool) {
+                if (have >= 3) break
+                if (p.personIds.contains(pid) && picked.add(p)) have++
+            }
+        }
+        // fill by rank, capping any single starred person at 45% of the shortlist
+        fun overCap(p: PhotoItem): Boolean {
+            if (p.faceCount == 0 || required.isEmpty()) return false
+            for (pid in required) {
+                if (!p.personIds.contains(pid)) continue
+                val share = picked.count { it.personIds.contains(pid) }.toFloat() / maxOf(1, picked.size)
+                if (share > 0.45f) return true
+            }
+            return false
+        }
+        for (p in pool) {
+            if (picked.size >= target) break
+            if (!overCap(p)) picked.add(p)
+        }
+        // backfill with the cap relaxed
+        for (p in pool) {
             if (picked.size >= target) break
             picked.add(p)
         }
