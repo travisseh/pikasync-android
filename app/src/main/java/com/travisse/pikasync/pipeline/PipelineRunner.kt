@@ -32,6 +32,9 @@ class PipelineRunner(private val context: Context) {
     ): PipelineResult {
         val monthKey = String.format(java.util.Locale.US, "%04d-%02d", year, month)
         val result = runInner(year, month, onStage)
+        if (result.error == null) {
+            RunStore.fromResult(year, month, result, trigger)?.let { RunStore.add(context, it) }
+        }
         RunStatusLog.write(
             context,
             month = monthKey,

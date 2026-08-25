@@ -4,7 +4,14 @@ import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -37,9 +44,9 @@ import java.util.Date
 import java.util.Locale
 import kotlin.concurrent.thread
 
-/** Mirror of the iOS ContentView: status/setup section + wake log list, newest first. */
+/** Dev/diagnostics surface: setup + wake log. Light restyle only (DESIGN.md). */
 @Composable
-fun SyncScreen() {
+fun SyncScreen(onClose: () -> Unit = {}) {
     val context = LocalContext.current
     var access by remember { mutableStateOf(SyncEngine.photoAccess(context)) }
     var events by remember { mutableStateOf(WakeLog.load(context)) }
@@ -67,7 +74,19 @@ fun SyncScreen() {
         permissionLauncher.launch(perms)
     }
 
-    LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    LazyColumn(
+        Modifier.fillMaxSize().background(Pika.Bg).statusBarsPadding(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp),
+    ) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, "back", tint = Pika.Ink)
+                }
+                Text("Sync & diagnostics", style = Pika.Title)
+            }
+        }
         item {
             Text("Setup", style = MaterialTheme.typography.titleMedium)
             Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {

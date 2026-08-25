@@ -1,24 +1,29 @@
 package com.travisse.pikasync.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.material3.Button
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -30,14 +35,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import androidx.compose.ui.unit.sp
 import com.travisse.pikasync.pipeline.PipelineResult
 import com.travisse.pikasync.pipeline.PipelineRunner
+import com.travisse.pikasync.pipeline.RunStore
+import com.travisse.pikasync.pipeline.SavedRun
 import com.travisse.pikasync.pipeline.StageTiming
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -59,9 +63,10 @@ private fun lastTwelveMonths(): List<MonthOption> {
     }
 }
 
+/** Create-a-book flow: pick a month, watch friendly progress, open the result. */
 @Composable
-fun PipelineScreen() {
-    val context = LocalContext.current
+fun PipelineScreen(onOpenBook: (SavedRun) -> Unit, onClose: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     val months = remember { lastTwelveMonths() }
     var selected by remember { mutableStateOf(months.first()) }
@@ -69,31 +74,38 @@ fun PipelineScreen() {
     var running by remember { mutableStateOf(false) }
     val timings = remember { mutableStateListOf<StageTiming>() }
     var result by remember { mutableStateOf<PipelineResult?>(null) }
-    var showBook by remember { mutableStateOf(false) }
 
-    val bookResult = result
-    if (showBook && bookResult?.judge != null) {
-        BookViewer(bookResult) { showBook = false }
-        return
-    }
+    Column(Modifier.fillMaxSize().background(Pika.Bg).statusBarsPadding()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onClose) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, "back", tint = Pika.Ink)
+            }
+        }
+        Column(Modifier.padding(horizontal = 20.dp)) {
+            Text("New book", style = Pika.Headline)
+            Spacer(Modifier.height(4.dp))
+            Text("Pick a month; Pikabook does the rest.", style = Pika.Caption, fontSize = 15.sp)
+            Spacer(Modifier.height(20.dp))
 
-    LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        item {
-            Text("Photobook pipeline", style = MaterialTheme.typography.titleMedium)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box {
-                    OutlinedButton(onClick = { menuOpen = true }, enabled = !running) {
-                        Text(selected.label)
+                    Row(
+                        Modifier
+                            .background(Pika.Section, Pika.PillShape)
+                            .clickable(enabled = !running) { menuOpen = true }
+                            .padding(horizontal = 20.dp, vertical = 13.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(selected.label, style = Pika.Body, fontWeight = FontWeight.Medium)
+                        Text("  ▾", color = Pika.InkSecondary, fontSize = 13.sp)
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         months.forEach { m ->
-                            DropdownMenuItem(text = { Text(m.label) }, onClick = {
-                                selected = m; menuOpen = false
-                            })
+                            DropdownMenuItem(text = { Text(m.label) }, onClick = { selected = m; menuOpen = false })
                         }
                     }
                 }
-                Button(enabled = !running, onClick = {
+                PillButton(text = if (running) "Making…" else "Make it", enabled = !running) {
                     running = true
                     timings.clear()
                     result = null
@@ -105,88 +117,60 @@ fun PipelineScreen() {
                         }
                         result = r
                         running = false
+                        if (r.error == null && r.judge != null) {
+                            RunStore.load(context).firstOrNull()?.let(onOpenBook)
+                        }
                     }
-                }) { Text(if (running) "Running..." else "Run") }
-                if (running) CircularProgressIndicator(Modifier.padding(start = 4.dp))
+                }
             }
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Spacer(Modifier.height(24.dp))
         }
-        items(timings) { t ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(t.name, fontWeight = FontWeight.Bold)
-                Text("${t.ms} ms", color = MaterialTheme.colorScheme.secondary)
+
+        LazyColumn(
+            Modifier.fillMaxSize().padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 40.dp),
+        ) {
+            items(timings) { t -> StageRow(t, done = true) }
+            if (running) {
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        CircularProgressIndicator(Modifier.size(16.dp), color = Pika.Coral, strokeWidth = 2.dp)
+                        Text("Working…", style = Pika.Caption, fontSize = 14.sp)
+                    }
+                }
             }
-            Text(t.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
-        }
-        item {
             result?.error?.let { err ->
-                Text("Error: $err", color = MaterialTheme.colorScheme.error)
-            }
-            result?.judge?.let { j ->
-                HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                Text("\"${j.title}\"", style = MaterialTheme.typography.titleMedium)
-                Text("Tokens: ${j.inputTokens} in / ${j.outputTokens} out")
-                Text("Cost estimate: $" + String.format(Locale.US, "%.4f", j.costUsd) +
-                        "  (\$3/M in, \$15/M out)")
-                Button(onClick = { showBook = true }) { Text("Open book") }
+                item {
+                    Text(
+                        err,
+                        color = Color(0xFFC13515),
+                        fontSize = 14.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFFC13515).copy(alpha = 0.06f), RoundedCornerShape(Pika.ChipRadius))
+                            .padding(14.dp),
+                    )
+                }
             }
         }
     }
 }
 
-/** Stage 8: book viewer. Page 0 is the cover; then the picks in page order. */
 @Composable
-private fun BookViewer(result: PipelineResult, onClose: () -> Unit) {
-    val judge = result.judge ?: return
-    val pagerState = rememberPagerState(pageCount = { judge.selections.size + 1 })
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(judge.title, color = Color.White, fontWeight = FontWeight.Bold)
-            OutlinedButton(onClick = onClose) { Text("Close") }
-        }
-        HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { page ->
-            if (page == 0) {
-                Column(
-                    Modifier.fillMaxSize().padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    result.shortlist.getOrNull(judge.coverIndex)?.let { cover ->
-                        AsyncImage(
-                            model = cover.uri,
-                            contentDescription = "cover",
-                            modifier = Modifier.fillMaxWidth().weight(1f),
-                            contentScale = ContentScale.Fit,
-                        )
-                    }
-                    Text(
-                        judge.title,
-                        color = Color.White,
-                        style = MaterialTheme.typography.headlineMedium,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(16.dp),
-                    )
-                }
-            } else {
-                val sel = judge.selections[page - 1]
-                val photo = result.shortlist.getOrNull(sel.index)
-                Column(Modifier.fillMaxSize().padding(8.dp)) {
-                    if (photo != null) {
-                        AsyncImage(
-                            model = photo.uri,
-                            contentDescription = "page ${sel.page}",
-                            modifier = Modifier.fillMaxWidth().weight(1f),
-                            contentScale = ContentScale.Fit,
-                        )
-                    }
-                    Text(
-                        "page ${sel.page}",
-                        color = Color.White,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth().padding(12.dp),
-                    )
-                }
+private fun StageRow(t: StageTiming, done: Boolean) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Box(
+            Modifier.padding(top = 5.dp).size(8.dp).background(if (done) Pika.Coral else Pika.Hairline, CircleShape)
+        )
+        Spacer(Modifier.size(12.dp))
+        Column(Modifier.weight(1f)) {
+            Row(Modifier.fillMaxWidth()) {
+                Text(t.name.substringAfter(' '), style = Pika.Body, fontWeight = FontWeight.Medium, fontSize = 15.sp)
+                Spacer(Modifier.weight(1f))
+                Text("${t.ms / 1000.0}s", style = Pika.Caption)
             }
+            Text(t.detail, style = Pika.Caption, fontSize = 12.sp)
         }
     }
 }
