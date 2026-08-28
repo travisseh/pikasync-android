@@ -15,8 +15,9 @@ Everything heavy runs on-device; only ~2–3 small contact-sheet JPEGs go to the
 judge server (`https://pikasync-judge.vercel.app/api/judge`, source in the iOS
 repo's `server/`), which holds the Anthropic key. No key ships in the app.
 
-Judging is **async** (`/api/judge/submit` → jobId, `/api/judge/result` to
-collect), so no step depends on a long-lived process.
+Judging uses the synchronous `/api/judge` endpoint — WorkManager's generous
+background budget fits the whole call (the async submit/collect endpoints exist
+for iOS's 30s wakes and are available if ever needed here).
 
 Pipeline stages (`app/src/main/java/com/travisse/pikasync/pipeline/`):
 
