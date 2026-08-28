@@ -84,8 +84,13 @@ fun SyncScreen(onClose: () -> Unit = {}) {
                 IconButton(onClick = onClose) {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "back", tint = Pika.Ink)
                 }
-                Text("Sync & diagnostics", style = Pika.Title)
+                Text("Diagnostics", style = Pika.Title)
             }
+            Text(
+                "Developer surface: background wake history and sync internals. Nothing here affects your books.",
+                style = Pika.Caption,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
         }
         item {
             Text("Setup", style = MaterialTheme.typography.titleMedium)

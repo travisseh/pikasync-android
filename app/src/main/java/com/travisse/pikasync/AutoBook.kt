@@ -56,7 +56,9 @@ object AutoBook {
             val nm = context.getSystemService(NotificationManager::class.java)
             val channelId = "autobook"
             nm.createNotificationChannel(
-                NotificationChannel(channelId, "Photobooks", NotificationManager.IMPORTANCE_DEFAULT)
+                NotificationChannel(channelId, "New books", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    description = "A notification when Pikabook finishes a monthly book"
+                }
             )
             val notification = android.app.Notification.Builder(context, channelId)
                 .setSmallIcon(android.R.drawable.ic_menu_gallery)

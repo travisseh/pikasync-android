@@ -37,18 +37,21 @@ object PeopleScanner {
 
     fun notifyPeopleChanged() { peopleVersion++ }
 
-    suspend fun scan(context: Context, monthsBack: Int = 6) {
+    /** monthsBack drives the deep scan (People tab); daysBack overrides it for the fast onboarding scan. */
+    suspend fun scan(context: Context, monthsBack: Int = 6, daysBack: Int? = null) {
         if (scanning) return
         scanning = true
         try {
-            withContext(Dispatchers.Default) { scanInner(context, monthsBack) }
+            withContext(Dispatchers.Default) { scanInner(context, monthsBack, daysBack) }
         } finally {
             scanning = false
         }
     }
 
-    private suspend fun scanInner(context: Context, monthsBack: Int) {
-        val start = Calendar.getInstance().apply { add(Calendar.MONTH, -monthsBack) }
+    private suspend fun scanInner(context: Context, monthsBack: Int, daysBack: Int? = null) {
+        val start = Calendar.getInstance().apply {
+            if (daysBack != null) add(Calendar.DAY_OF_YEAR, -daysBack) else add(Calendar.MONTH, -monthsBack)
+        }
         val startSec = start.timeInMillis / 1000
         data class Row(val id: Long, val bucket: String, val path: String)
         val rows = mutableListOf<Row>()
@@ -59,8 +62,13 @@ object PeopleScanner {
                 MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
                 MediaStore.Images.Media.RELATIVE_PATH,
             ),
-            "${MediaStore.Images.Media.DATE_ADDED} >= ? OR ${MediaStore.Images.Media.DATE_TAKEN} >= ?",
-            arrayOf(startSec.toString(), start.timeInMillis.toString()),
+            // window = when the photo was TAKEN (EXIF), falling back to DATE_ADDED
+            // only when DATE_TAKEN is missing (mirrors the pipeline's month query;
+            // DATE_ADDED alone is wrong for synced/restored libraries).
+            "(${MediaStore.Images.Media.DATE_TAKEN} >= ?) OR " +
+                "((${MediaStore.Images.Media.DATE_TAKEN} IS NULL OR ${MediaStore.Images.Media.DATE_TAKEN} = 0) AND " +
+                "${MediaStore.Images.Media.DATE_ADDED} >= ?)",
+            arrayOf(start.timeInMillis.toString(), startSec.toString()),
             "${MediaStore.Images.Media.DATE_TAKEN} DESC",
         )?.use { c ->
             val idCol = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID)

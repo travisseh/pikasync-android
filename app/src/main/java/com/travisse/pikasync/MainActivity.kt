@@ -18,7 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Person
-import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -63,6 +63,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun Root() {
     val context = androidx.compose.ui.platform.LocalContext.current
+    var showOnboarding by remember {
+        mutableStateOf(com.travisse.pikasync.ui.Onboarding.shouldShow(context))
+    }
+    if (showOnboarding) {
+        com.travisse.pikasync.ui.OnboardingScreen(onDone = { showOnboarding = false })
+        return
+    }
     var tab by remember { mutableStateOf(Tab.Books) }
     var openBook by remember { mutableStateOf<SavedRun?>(null) }
     var showCreate by remember { mutableStateOf(false) }
@@ -110,8 +117,8 @@ private fun Root() {
                 NavigationBarItem(
                     selected = tab == Tab.Sync,
                     onClick = { tab = Tab.Sync },
-                    icon = { Icon(Icons.Outlined.Refresh, "Sync") },
-                    label = { Text("Sync") },
+                    icon = { Icon(Icons.Outlined.Settings, "Settings") },
+                    label = { Text("Settings") },
                     colors = navColors(),
                 )
             }

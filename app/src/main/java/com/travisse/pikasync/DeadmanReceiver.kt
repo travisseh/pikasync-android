@@ -12,7 +12,7 @@ class DeadmanReceiver : BroadcastReceiver() {
         val nm = context.getSystemService(NotificationManager::class.java)
         val channelId = "deadman"
         nm.createNotificationChannel(
-            NotificationChannel(channelId, "Sync health", NotificationManager.IMPORTANCE_HIGH)
+            NotificationChannel(channelId, "Background sync alerts", NotificationManager.IMPORTANCE_HIGH)
         )
         val notification = android.app.Notification.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.stat_notify_error)
