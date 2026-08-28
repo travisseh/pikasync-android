@@ -318,7 +318,7 @@ private fun SelectPeopleStep(onDone: () -> Unit) {
         Text("Your books are about them", style = Pika.Title, fontSize = 24.sp)
         Spacer(Modifier.height(8.dp))
         Text(
-            "We found who shows up most. Every photo in your books will include at least one selected person — tap to change who's in. Naming faces can wait; do it anytime in People.",
+            "We found who shows up most. Every photo in your books will include at least one selected person; tap to change who's in. Naming faces can wait; do it anytime in People.",
             style = Pika.Body, color = Pika.InkSecondary, lineHeight = 22.sp, fontSize = 15.sp,
         )
         LazyVerticalGrid(
