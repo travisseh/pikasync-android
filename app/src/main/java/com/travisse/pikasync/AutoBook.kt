@@ -41,6 +41,7 @@ object AutoBook {
             return
         }
 
+        Analytics.setup(context)
         WakeLog.record(context, "bg_book", 0, 0, "generating book for $label")
         val t0 = System.currentTimeMillis()
         val result = PipelineRunner(context).run(year, month, trigger = "bg") { }
@@ -54,6 +55,7 @@ object AutoBook {
                 prefs.edit().putBoolean(marker, true).apply()
                 WakeLog.record(context, "bg_book", 0, 0, "skipped $label: ${error.take(80)}")
             } else {
+                Analytics.capture("run_failed", mapOf("trigger" to "bg", "error" to error.take(200)))
                 WakeLog.record(context, "bg_book", -1, -1, "failed after ${secs}s: ${error.take(120)}")
             }
             return
@@ -61,6 +63,7 @@ object AutoBook {
 
         prefs.edit().putBoolean(marker, true).apply()
         val picks = result.judge?.selections?.size ?: 0
+        Analytics.capture("book_created", mapOf("trigger" to "bg", "pages" to picks))
         WakeLog.record(context, "bg_book", picks, 0, "book ready in ${secs}s — ${result.judge?.title ?: ""}")
         notifyReady(context, result.judge?.title ?: "monthly", label)
     }

@@ -78,6 +78,8 @@ class PipelineRunner(private val context: Context) {
             val timing = StageTiming(name, System.currentTimeMillis() - t0, detail(out))
             timings += timing
             onStage(timing)
+            com.travisse.pikasync.Analytics.capture("book_stage",
+                mapOf("stage" to name, "seconds" to timing.ms / 1000.0, "detail" to timing.detail))
             return out
         }
         suspend fun <T> stageS(name: String, detail: (T) -> String, block: suspend () -> T): T {
@@ -86,6 +88,8 @@ class PipelineRunner(private val context: Context) {
             val timing = StageTiming(name, System.currentTimeMillis() - t0, detail(out))
             timings += timing
             onStage(timing)
+            com.travisse.pikasync.Analytics.capture("book_stage",
+                mapOf("stage" to name, "seconds" to timing.ms / 1000.0, "detail" to timing.detail))
             return out
         }
 

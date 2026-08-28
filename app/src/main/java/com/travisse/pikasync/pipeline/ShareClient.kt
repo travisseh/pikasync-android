@@ -4,7 +4,13 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.net.Uri
+import com.travisse.pikasync.Analytics
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -27,12 +33,30 @@ object ShareClient {
     suspend fun upload(
         context: Context,
         run: SavedRun,
-        onProgress: (String) -> Unit = {},
     ): ShareResult = withContext(Dispatchers.IO) {
+        val t0 = System.currentTimeMillis()
+        Analytics.capture("share_upload_started", mapOf("pages" to run.selections.size + 1))
+        try {
+            val (result, bytes) = uploadInner(context, run)
+            Analytics.capture("share_upload_completed", mapOf(
+                "pages" to run.selections.size + 1,
+                "seconds" to (System.currentTimeMillis() - t0) / 1000.0,
+                "bytes" to bytes,
+            ))
+            result
+        } catch (e: Exception) {
+            Analytics.capture("share_upload_failed", mapOf(
+                "seconds" to (System.currentTimeMillis() - t0) / 1000.0,
+                "error" to (e.message ?: e.toString()).take(200),
+            ))
+            throw e
+        }
+    }
+
+    private suspend fun uploadInner(context: Context, run: SavedRun): Pair<ShareResult, Int> = coroutineScope {
         // Page 0 is the cover; book pages follow in order.
         val ordered = listOf(run.coverUri) + run.selections.sortedBy { it.page }.map { it.uri }
 
-        onProgress("creating book…")
         val create = postJson(
             "/create-book",
             JSONObject()
@@ -45,28 +69,35 @@ object ShareClient {
         val bookId = create.getString("bookId")
         val uploadUrls = create.getJSONArray("uploadUrls")
 
-        val pages = JSONArray()
-        ordered.forEachIndexed { i, uriStr ->
-            onProgress("uploading ${i + 1}/${ordered.size}…")
-            val jpeg = loadJpeg(context, Uri.parse(uriStr))
-                ?: throw IllegalStateException("couldn't load photo for page $i")
-            val conn = URL(uploadUrls.getString(i)).openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.doOutput = true
-            conn.setRequestProperty("content-type", "image/jpeg")
-            conn.outputStream.use { it.write(jpeg) }
-            val code = conn.responseCode
-            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
-                ?.bufferedReader()?.readText() ?: ""
-            if (code != 200) throw IllegalStateException("page upload failed ($code)")
-            pages.put(
-                JSONObject().put("page", i).put("storageId", JSONObject(body).getString("storageId"))
-            )
-        }
+        // Encode + upload pages concurrently (5 in flight) instead of one by one.
+        val sem = Semaphore(5)
+        var totalBytes = 0
+        val results = ordered.mapIndexed { i, uriStr ->
+            async(Dispatchers.IO) {
+                sem.withPermit {
+                    val jpeg = loadJpeg(context, Uri.parse(uriStr))
+                        ?: throw IllegalStateException("couldn't load photo for page $i")
+                    synchronized(this@ShareClient) { totalBytes += jpeg.size }
+                    val conn = URL(uploadUrls.getString(i)).openConnection() as HttpURLConnection
+                    conn.requestMethod = "POST"
+                    conn.doOutput = true
+                    conn.setRequestProperty("content-type", "image/jpeg")
+                    conn.outputStream.use { it.write(jpeg) }
+                    val code = conn.responseCode
+                    val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                        ?.bufferedReader()?.readText() ?: ""
+                    if (code != 200) throw IllegalStateException("page upload failed ($code)")
+                    i to JSONObject(body).getString("storageId")
+                }
+            }
+        }.awaitAll()
 
-        onProgress("finalizing…")
+        val pages = JSONArray()
+        results.sortedBy { it.first }.forEach { (page, storageId) ->
+            pages.put(JSONObject().put("page", page).put("storageId", storageId))
+        }
         postJson("/finalize-book", JSONObject().put("bookId", bookId).put("pages", pages))
-        ShareResult(SHARE_BASE + shareId, shareId)
+        ShareResult(SHARE_BASE + shareId, shareId) to totalBytes
     }
 
     /** In-app feedback lands in the same Convex table the web viewers write to. */

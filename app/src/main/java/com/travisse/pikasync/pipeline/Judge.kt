@@ -107,6 +107,11 @@ object Judge {
             "Judge returned out-of-range index (candidates 0..${candidateCount - 1})"
         }
 
+        com.travisse.pikasync.Analytics.capture("judge_collected", mapOf(
+            "input_tokens" to usage.optInt("input_tokens", 0),
+            "output_tokens" to usage.optInt("output_tokens", 0),
+            "cost_usd" to usage.optInt("input_tokens", 0) * 3.0 / 1e6 + usage.optInt("output_tokens", 0) * 15.0 / 1e6,
+        ))
         return JudgeResult(
             title = book.optString("title", "Untitled Month"),
             coverIndex = book.optInt("cover_index", indexes.first()),

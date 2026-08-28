@@ -177,7 +177,10 @@ private fun TagIntroStep(onNext: () -> Unit) {
             lineHeight = 24.sp,
         )
         Spacer(Modifier.height(40.dp))
-        PillButton("Find my people", modifier = Modifier.fillMaxWidth().height(52.dp), onClick = onNext)
+        PillButton("Find my people", modifier = Modifier.fillMaxWidth().height(52.dp), onClick = {
+            com.travisse.pikasync.Analytics.capture("onboarding_welcome_continue")
+            onNext()
+        })
     }
 }
 
@@ -397,7 +400,10 @@ private fun SelectPeopleStep(onNext: () -> Unit) {
                 }
             }
         }
-        PillButton("Continue", modifier = Modifier.fillMaxWidth().height(52.dp)) { applyAndFinish() }
+        PillButton("Continue", modifier = Modifier.fillMaxWidth().height(52.dp)) {
+            com.travisse.pikasync.Analytics.capture("onboarding_people_saved", mapOf("selected" to selectedIds.size))
+            applyAndFinish()
+        }
         Spacer(Modifier.height(16.dp))
     }
 }
@@ -442,9 +448,15 @@ private fun FirstBookStep(onMake: () -> Unit, onLater: () -> Unit) {
         }
         Spacer(Modifier.height(40.dp))
         if (!alreadyMade && count >= 8) {
-            PillButton("Make my first book", modifier = Modifier.fillMaxWidth().height(52.dp), onClick = onMake)
+            PillButton("Make my first book", modifier = Modifier.fillMaxWidth().height(52.dp), onClick = {
+                com.travisse.pikasync.Analytics.capture("onboarding_first_book", mapOf("choice" to "make"))
+                onMake()
+            })
             Spacer(Modifier.height(10.dp))
-            TextButton(onClick = onLater) {
+            TextButton(onClick = {
+                com.travisse.pikasync.Analytics.capture("onboarding_first_book", mapOf("choice" to "later"))
+                onLater()
+            }) {
                 Text("Maybe later", color = Pika.InkSecondary, fontSize = 15.sp)
             }
         } else {

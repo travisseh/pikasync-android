@@ -51,6 +51,7 @@ private enum class Tab { Books, People, Sync }
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Analytics.setup(this)
         enableEdgeToEdge()
         // arm wake paths on every foreground launch; retry any failed auto-shares
         SyncEngine.scheduleContentJob(this)

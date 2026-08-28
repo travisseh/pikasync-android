@@ -35,6 +35,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -78,21 +79,26 @@ fun BookScreen(run: SavedRun, onDelete: () -> Unit, onClose: () -> Unit) {
     // Full-photo detail: sharePage 0 = cover, selection.page otherwise.
     var detail by remember { mutableStateOf<Pair<String, Int>?>(null) }  // (uri, sharePage)
     var feedbackTarget by remember { mutableStateOf<Int?>(null) }        // sharePage; -1 = whole book
-    var shareStatus by remember { mutableStateOf<String?>(null) }
+    var shareStatus by remember { mutableStateOf<String?>(null) }  // brief error/confirm capsule only
+    var sharing by remember { mutableStateOf(false) }
+    LaunchedEffect(run.id) {
+        com.travisse.pikasync.Analytics.capture("book_viewed",
+            mapOf("pages" to run.selections.size, "shared" to (run.shareUrl != null)))
+    }
 
     // Lazily create the server book, caching share info on the stored run.
     suspend fun ensureShared(): SavedRun {
         val current = RunStore.load(context).firstOrNull { it.id == run.id } ?: run
         if (current.shareId != null) return current
-        shareStatus = "preparing book…"
+        sharing = true
         try {
-            val share = ShareClient.upload(context, current) { shareStatus = it }
+            val share = ShareClient.upload(context, current)
             val updated = current.copy(shareId = share.shareId, shareUrl = share.url, needsShare = false)
             RunStore.update(context, updated)
             BookCreator.notifyRunsChanged()
             return updated
         } finally {
-            shareStatus = null
+            sharing = false
         }
     }
 
@@ -173,14 +179,20 @@ fun BookScreen(run: SavedRun, onDelete: () -> Unit, onClose: () -> Unit) {
             }
         }
 
-        shareStatus?.let {
-            Text(
-                it,
-                style = Pika.Caption,
-                fontSize = 13.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth().background(Pika.Section).padding(6.dp),
-            )
+        if (sharing || shareStatus != null) {
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (sharing) {
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Pika.Coral)
+                    Spacer(Modifier.size(8.dp))
+                    Text("Preparing link…", style = Pika.Caption, fontSize = 13.sp)
+                } else {
+                    Text(shareStatus ?: "", style = Pika.Caption, fontSize = 13.sp)
+                }
+            }
         }
 
         // Page dots (no numbers anywhere).
@@ -292,6 +304,8 @@ fun BookScreen(run: SavedRun, onDelete: () -> Unit, onClose: () -> Unit) {
                             reaction = reaction,
                             text = text,
                         )
+                        com.travisse.pikasync.Analytics.capture("feedback_posted",
+                            mapOf("page" to (if (target == -1) -1 else target), "has_text" to !text.isNullOrBlank(), "reaction" to (reaction ?: "")))
                         shareStatus = "Feedback sent"
                         kotlinx.coroutines.delay(1500)
                         shareStatus = null
@@ -320,7 +334,11 @@ fun BookScreen(run: SavedRun, onDelete: () -> Unit, onClose: () -> Unit) {
                 Text("\"${run.title}\" will be removed. Your photos stay in your library.", style = Pika.Caption, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(20.dp))
                 androidx.compose.material3.Button(
-                    onClick = { showDeleteConfirm = false; onDelete() },
+                    onClick = {
+                        showDeleteConfirm = false
+                        com.travisse.pikasync.Analytics.capture("book_deleted", mapOf("pages" to run.selections.size))
+                        onDelete()
+                    },
                     shape = Pika.PillShape,
                     colors = androidx.compose.material3.ButtonDefaults.buttonColors(
                         containerColor = Color(0xFFC13515), contentColor = Color.White
