@@ -28,6 +28,11 @@ Emulator: AVD `pika`, usually `emulator-5554`, test photos in
   `adb shell run-as com.travisse.pikasync rm shared_prefs/autobook.xml`
 - Wake beacons: `ntfy.sh/pikasync-android-trav-8347` (~12h retention; the
   in-app wake log is the durable record).
+- Distribute to testers: `npx -y firebase-tools appdistribution:distribute
+  app/build/outputs/apk/debug/app-debug.apk --app
+  1:873775304604:android:f788963bc0be2782aec259 --groups pikabook-testers`
+- `run-as` file reads work via `adb shell "run-as … cat"`; `exec-out` variants
+  can fail on the emulator.
 
 ## Conventions
 
@@ -36,6 +41,11 @@ Emulator: AVD `pika`, usually `emulator-5554`, test photos in
   you change a rule here, flag the other two.
 - MediaStore ingest filters by `DATE_TAKEN` with `DATE_ADDED` fallback — don't
   "simplify" to `DATE_ADDED` (it's the file-copy time, wrong for synced photos).
-- Judge server contract and its gotchas (4.5MB body cap, reasoning-vs-max_tokens)
-  are documented in the iOS repo's AGENTS.md; the server source lives there
-  (`server/`).
+- Judge server contract and its gotchas (4.5MB body cap, reasoning-vs-max_tokens,
+  async submit/result endpoints) are documented in the iOS repo's AGENTS.md; the
+  server source lives there (`server/`).
+- Face identity must stay embedding-compatible with iOS (same `w600k_mbf`
+  weights, same 5-point alignment) — swapping either side breaks cross-platform
+  person clusters.
+- PostHog events (`Analytics.kt`) share names with iOS/web — don't rename
+  unilaterally; no photo content/filenames in properties.

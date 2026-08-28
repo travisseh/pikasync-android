@@ -15,10 +15,18 @@ Everything heavy runs on-device; only ~2–3 small contact-sheet JPEGs go to the
 judge server (`https://pikasync-judge.vercel.app/api/judge`, source in the iOS
 repo's `server/`), which holds the Anthropic key. No key ships in the app.
 
+Judging is **async** (`/api/judge/submit` → jobId, `/api/judge/result` to
+collect), so no step depends on a long-lived process.
+
 Pipeline stages (`app/src/main/java/com/travisse/pikasync/pipeline/`):
 
 1. **Ingest** — MediaStore month query by `DATE_TAKEN` (falls back to `DATE_ADDED`)
-2. **Scoring** — ML Kit face detection + sharpness/exposure heuristics
+2. **Scoring** — ML Kit face detection + sharpness/exposure heuristics, cached in
+   `ScoreCache` so onboarding prescoring and repeat runs are cheap
+2b. **Face identity** — ArcFace `w600k_mbf.onnx` via ONNX Runtime, aligned from
+   ML Kit landmarks (embeddings match the iOS Core ML port at 0.94–0.98 cosine,
+   so person clusters are cross-platform); clusters persist in `files/people.json`
+   (name / star = required / exclude), driving stranger drops and starred seats
 3. **Document gate** — ML Kit text recognition drops letters/receipts/screenshots
    by text-block density (tuned against a real IRS letter)
 4. **Burst dedup** — time window + aHash similarity
@@ -31,6 +39,18 @@ Pipeline stages (`app/src/main/java/com/travisse/pikasync/pipeline/`):
    `max(4, min(poolScaled, 2×sessions, sceneClusters))`
 9. **Scene check** — deterministic post-judge duplicate check; corrective retry at
    ≥2 residual pairs (1 tolerated for major events)
+
+## UX
+
+Airbnb-style design system (tokens mirrored from `pikasync-poc/DESIGN.md`):
+image-forward Books gallery, square-spread book viewer with per-photo feedback,
+bottom sheets, coral FAB → "Create Photobook" sheet with a live loading entry.
+First-run onboarding: welcome → permission priming → scan of the 200 most
+recent photos (prescores last month in the background while the user picks) →
+top-10 people grid with top 3 pre-selected → explicit "Make my first book"
+step. Books auto-share silently after creation (5 concurrent 1600px uploads);
+share/feedback buttons show a spinner only if tapped before the link exists.
+Analytics: PostHog (`Analytics.kt`, same event taxonomy as iOS/web).
 
 ## Background generation
 
@@ -49,6 +69,13 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 `local.properties` (gitignored) needs `sdk.dir`; the legacy `ANTHROPIC_API_KEY`
 entry is unused now that judging is server-side.
+
+Tester distribution is Firebase App Distribution (project `pikabook-poc-7h3k`,
+group `pikabook-testers`):
+
+```bash
+npx -y firebase-tools appdistribution:distribute   app/build/outputs/apk/debug/app-debug.apk   --app 1:873775304604:android:f788963bc0be2782aec259   --groups pikabook-testers --release-notes "..."
+```
 
 ## Observability & testing
 
