@@ -64,6 +64,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.travisse.pikasync.SyncEngine
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.travisse.pikasync.pipeline.PeopleScanner
 import com.travisse.pikasync.pipeline.PeopleStore
 import com.travisse.pikasync.pipeline.RunStore
@@ -96,16 +98,31 @@ object Onboarding {
     }
 }
 
-private enum class Step { TagIntro, Permission, Scan, Select }
+private enum class Step { TagIntro, Permission, Scan, Select, FirstBook }
 
 @Composable
 fun OnboardingScreen(onDone: () -> Unit) {
     val context = LocalContext.current
     var step by remember { mutableStateOf(Step.TagIntro) }
 
+    // While the user lingers on the people grid, pre-score last month's photos
+    // in the background so "Make my first book" starts with work already done.
+    LaunchedEffect(step) {
+        if (step == Step.Select) {
+            withContext(Dispatchers.Default) {
+                val cal = Calendar.getInstance().apply { set(Calendar.DAY_OF_MONTH, 1); add(Calendar.MONTH, -1) }
+                try {
+                    com.travisse.pikasync.pipeline.PipelineRunner(context.applicationContext).prescoreMonth(
+                        cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1,
+                        shouldStop = { BookCreator.active?.running == true },
+                    )
+                } catch (_: Exception) { /* prescore is pure optimization */ }
+            }
+        }
+    }
+
     fun finish() {
         Onboarding.markDone(context)
-        startFirstBook(context)
         onDone()
     }
 
@@ -122,7 +139,14 @@ fun OnboardingScreen(onDone: () -> Unit) {
                     onContinuePartial = { step = Step.Scan },
                 )
                 Step.Scan -> ScanStep { step = Step.Select }
-                Step.Select -> SelectPeopleStep(onDone = { finish() })
+                Step.Select -> SelectPeopleStep(onNext = { step = Step.FirstBook })
+                Step.FirstBook -> FirstBookStep(
+                    onMake = {
+                        startFirstBook(context)
+                        finish()
+                    },
+                    onLater = { finish() },
+                )
             }
         }
     }
@@ -255,7 +279,7 @@ private fun ScanStep(onNext: () -> Unit) {
     val context = LocalContext.current
     LaunchedEffect(Unit) {
         if (!PeopleScanner.hasScanned(context)) {
-            PeopleScanner.scan(context, daysBack = 60)  // fast first pass; deep rescan lives in People
+            PeopleScanner.scan(context, limitCount = 200)  // fast first pass; deep rescan lives in People
             PeopleScanner.notifyPeopleChanged()
         }
         onNext()
@@ -268,7 +292,7 @@ private fun ScanStep(onNext: () -> Unit) {
         Text("Finding your people", style = Pika.Title, fontSize = 24.sp)
         Spacer(Modifier.height(12.dp))
         Text(
-            "Scanning your last 60 days of photos for the faces that show up most. This stays on your phone.",
+            "Scanning your 200 most recent photos for the faces that show up most. This stays on your phone.",
             style = Pika.Body, color = Pika.InkSecondary, textAlign = TextAlign.Center, lineHeight = 23.sp,
         )
         Spacer(Modifier.height(32.dp))
@@ -286,7 +310,7 @@ private fun ScanStep(onNext: () -> Unit) {
 // MARK: select your people
 
 @Composable
-private fun SelectPeopleStep(onDone: () -> Unit) {
+private fun SelectPeopleStep(onNext: () -> Unit) {
     val context = LocalContext.current
     val version = PeopleScanner.peopleVersion
     val clusters = remember(version) {
@@ -298,7 +322,7 @@ private fun SelectPeopleStep(onDone: () -> Unit) {
     }
 
     // Nothing found (tiny library, partial access): don't strand the user here.
-    LaunchedEffect(clusters.size) { if (clusters.isEmpty()) onDone() }
+    LaunchedEffect(clusters.size) { if (clusters.isEmpty()) onNext() }
 
     fun applyAndFinish() {
         val all = PeopleStore.load(context)
@@ -310,7 +334,7 @@ private fun SelectPeopleStep(onDone: () -> Unit) {
             }
         }
         PeopleScanner.notifyPeopleChanged()
-        onDone()
+        onNext()
     }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
@@ -380,11 +404,58 @@ private fun SelectPeopleStep(onDone: () -> Unit) {
 
 // MARK: first book
 
+@Composable
+private fun FirstBookStep(onMake: () -> Unit, onLater: () -> Unit) {
+    val context = LocalContext.current
+    val cal = remember { Calendar.getInstance().apply { set(Calendar.DAY_OF_MONTH, 1); add(Calendar.MONTH, -1) } }
+    val label = remember { SimpleDateFormat("MMMM", Locale.US).format(cal.time) }
+    val count = remember {
+        photoCountInMonth(context, cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1)
+    }
+    val alreadyMade = remember {
+        val monthLabel = SimpleDateFormat("MMMM yyyy", Locale.US).format(cal.time)
+        RunStore.load(context).any { it.monthLabel == monthLabel } || BookCreator.active?.running == true
+    }
+
+    Column(
+        Modifier.fillMaxSize().padding(horizontal = 28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text("📕", fontSize = 44.sp)
+        Spacer(Modifier.height(20.dp))
+        Text("Your first book", style = Pika.Headline, fontSize = 30.sp, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(12.dp))
+        when {
+            alreadyMade -> Text(
+                "Good news: your $label book is already on its way. From here Pikabook makes one every month, automatically.",
+                style = Pika.Body, color = Pika.InkSecondary, textAlign = TextAlign.Center, lineHeight = 24.sp,
+            )
+            count < 8 -> Text(
+                "$label only has $count photos, so we'll skip it. Your first book will arrive automatically at the start of next month.",
+                style = Pika.Body, color = Pika.InkSecondary, textAlign = TextAlign.Center, lineHeight = 24.sp,
+            )
+            else -> Text(
+                "Let's turn your $label photos into your first book. It takes a couple of minutes; we'll notify you when it's ready.",
+                style = Pika.Body, color = Pika.InkSecondary, textAlign = TextAlign.Center, lineHeight = 24.sp,
+            )
+        }
+        Spacer(Modifier.height(40.dp))
+        if (!alreadyMade && count >= 8) {
+            PillButton("Make my first book", modifier = Modifier.fillMaxWidth().height(52.dp), onClick = onMake)
+            Spacer(Modifier.height(10.dp))
+            TextButton(onClick = onLater) {
+                Text("Maybe later", color = Pika.InkSecondary, fontSize = 15.sp)
+            }
+        } else {
+            PillButton("Done", modifier = Modifier.fillMaxWidth().height(52.dp), onClick = onLater)
+        }
+    }
+}
+
 /**
- * Kick off last month's book so the gallery isn't empty — skipped for tiny
- * months, and skipped when the background AutoBook worker already made it
- * (it can race onboarding: the worker arms on app launch and a long people
- * scan gives it time to finish first).
+ * Kick off last month's book — skipped for tiny months, and skipped when the
+ * background AutoBook worker already made it (it can race onboarding).
  */
 private fun startFirstBook(context: Context) {
     val cal = Calendar.getInstance().apply { set(Calendar.DAY_OF_MONTH, 1); add(Calendar.MONTH, -1) }

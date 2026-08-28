@@ -265,6 +265,7 @@ class PipelineRunner(private val context: Context) {
         val utilityDropped = items.size - survivors.size
         var docsDropped = 0
 
+        val cached = ScoreCache.load(context)
         val detector = FaceDetection.getClient(
             FaceDetectorOptions.Builder()
                 .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
@@ -282,62 +283,142 @@ class PipelineRunner(private val context: Context) {
         val kept = mutableListOf<PhotoItem>()
         try {
             for (p in survivors) {
-                val bmp = loadThumb(p, 512) ?: continue
-                // document gate: catches camera photos of letters/receipts/whiteboards
-                // that folder exclusion can't see. Runs only on folder-gate survivors.
-                if (isDocument(textRecognizer, bmp, p)) {
-                    docsDropped++
-                    bmp.recycle()
+                // pre-scored (onboarding or an earlier run): reuse and skip decoding
+                val hit = cached[p.id]
+                if (hit != null) {
+                    if (hit.isDoc) { docsDropped++; continue }
+                    p.faceCount = hit.faceCount
+                    p.faceQuality = hit.faceQuality
+                    p.sharpness = hit.sharpness
+                    p.aHash = hit.aHash
+                    p.personIds = hit.personIds
+                    kept += p
                     continue
                 }
+                val isDoc = scoreOne(p, detector, landmarkDetector, textRecognizer)
+                if (isDoc == null) continue  // undecodable
+                ScoreCache.put(context, p.id, ScoreCache.Entry(
+                    p.faceCount, p.faceQuality, p.sharpness, p.aHash, p.personIds,
+                    isDoc, System.currentTimeMillis(),
+                ))
+                if (isDoc) { docsDropped++; continue }
                 kept += p
-                // faces
-                try {
-                    val faces = detector.process(InputImage.fromBitmap(bmp, 0)).await()
-                    p.faceCount = faces.size
-                    if (faces.isNotEmpty()) {
-                        val perFace = faces.map { f ->
-                            val eyes = listOfNotNull(f.leftEyeOpenProbability, f.rightEyeOpenProbability)
-                                .map(Float::toDouble).ifEmpty { listOf(0.5) }.average()
-                            val smile = f.smilingProbability?.toDouble() ?: 0.5
-                            0.6 * eyes + 0.4 * smile
-                        }.average()
-                        // presence of more faces nudges quality up a little
-                        p.faceQuality = (0.85 * perFace + 0.15 * min(faces.size, 3) / 3.0).coerceIn(0.0, 1.0)
-                    }
-                } catch (_: Exception) { /* face scoring is best-effort */ }
-                // face IDENTITY: embed eligible faces on a 900px decode and assign
-                // to PeopleStore clusters (auto-creates clusters for new people,
-                // exactly like iOS IncrementalScorer). Best-effort.
-                if (p.faceCount > 0) {
-                    try {
-                        val big = loadThumb(p, 900)
-                        if (big != null) {
-                            val faces = landmarkDetector.process(InputImage.fromBitmap(big, 0)).await()
-                            val ids = mutableSetOf<String>()
-                            for (f in faces.filter { FaceEmbedder.eligible(it, big.width) }.take(6)) {
-                                val crop = FaceEmbedder.alignedCrop(big, f) ?: continue
-                                val emb = FaceEmbedder.embed(context, crop)
-                                crop.recycle()
-                                if (emb != null) ids += PeopleStore.assign(context, emb, null)
-                            }
-                            p.personIds = ids
-                            big.recycle()
-                        }
-                    } catch (_: Exception) { /* identity is best-effort */ }
-                }
-                // sharpness + aHash on grayscale downscales
-                val gray = grayscale(bmp, 128)
-                p.sharpness = laplacianVariance(gray.first, gray.second, gray.third)
-                p.aHash = averageHash(bmp)
-                bmp.recycle()
             }
         } finally {
             detector.close()
             landmarkDetector.close()
             textRecognizer.close()
         }
+        ScoreCache.save(context)
         return ScoreResult(kept, utilityDropped, docsDropped)
+    }
+
+    /**
+     * The full per-photo scoring path (document gate, ML Kit face quality,
+     * identity embedding, sharpness, aHash) shared by pipeline runs and the
+     * onboarding prescore. Returns true if the photo is a document (drop),
+     * false if scored and kept, null if it couldn't be decoded.
+     */
+    suspend fun scoreOne(
+        p: PhotoItem,
+        detector: com.google.mlkit.vision.face.FaceDetector,
+        landmarkDetector: com.google.mlkit.vision.face.FaceDetector,
+        textRecognizer: com.google.mlkit.vision.text.TextRecognizer,
+    ): Boolean? {
+        val bmp = loadThumb(p, 512) ?: return null
+        // document gate: catches camera photos of letters/receipts/whiteboards
+        // that folder exclusion can't see. Runs only on folder-gate survivors.
+        if (isDocument(textRecognizer, bmp, p)) {
+            bmp.recycle()
+            return true
+        }
+        // faces
+        try {
+            val faces = detector.process(InputImage.fromBitmap(bmp, 0)).await()
+            p.faceCount = faces.size
+            if (faces.isNotEmpty()) {
+                val perFace = faces.map { f ->
+                    val eyes = listOfNotNull(f.leftEyeOpenProbability, f.rightEyeOpenProbability)
+                        .map(Float::toDouble).ifEmpty { listOf(0.5) }.average()
+                    val smile = f.smilingProbability?.toDouble() ?: 0.5
+                    0.6 * eyes + 0.4 * smile
+                }.average()
+                // presence of more faces nudges quality up a little
+                p.faceQuality = (0.85 * perFace + 0.15 * min(faces.size, 3) / 3.0).coerceIn(0.0, 1.0)
+            }
+        } catch (_: Exception) { /* face scoring is best-effort */ }
+        // face IDENTITY: embed eligible faces on a 900px decode and assign
+        // to PeopleStore clusters (auto-creates clusters for new people,
+        // exactly like iOS IncrementalScorer). Best-effort.
+        if (p.faceCount > 0) {
+            try {
+                val big = loadThumb(p, 900)
+                if (big != null) {
+                    val faces = landmarkDetector.process(InputImage.fromBitmap(big, 0)).await()
+                    val ids = mutableSetOf<String>()
+                    for (f in faces.filter { FaceEmbedder.eligible(it, big.width) }.take(6)) {
+                        val crop = FaceEmbedder.alignedCrop(big, f) ?: continue
+                        val emb = FaceEmbedder.embed(context, crop)
+                        crop.recycle()
+                        if (emb != null) ids += PeopleStore.assign(context, emb, null)
+                    }
+                    p.personIds = ids
+                    big.recycle()
+                }
+            } catch (_: Exception) { /* identity is best-effort */ }
+        }
+        // sharpness + aHash on grayscale downscales
+        val gray = grayscale(bmp, 128)
+        p.sharpness = laplacianVariance(gray.first, gray.second, gray.third)
+        p.aHash = averageHash(bmp)
+        bmp.recycle()
+        return false
+    }
+
+    /**
+     * Onboarding prescore: run the shared scoring path over LAST month's photos
+     * and fill the score cache so "Make my first book" starts partially
+     * pre-scored. Safe to run while the user sits on the people grid; skipped
+     * if a book build is already running (they share PeopleStore writes).
+     */
+    suspend fun prescoreMonth(year: Int, month: Int, shouldStop: () -> Boolean = { false }) {
+        val items = ingest(year, month)
+        if (items.isEmpty()) return
+        val cached = ScoreCache.load(context)
+        val todo = items.filter { p ->
+            cached[p.id] == null && utilityFolders.none { "${p.bucket} ${p.relativePath}".lowercase().contains(it) }
+        }
+        if (todo.isEmpty()) return
+        val detector = FaceDetection.getClient(
+            FaceDetectorOptions.Builder()
+                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+                .build()
+        )
+        val landmarkDetector = FaceDetection.getClient(
+            FaceDetectorOptions.Builder()
+                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+                .build()
+        )
+        val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        try {
+            for ((i, p) in todo.withIndex()) {
+                if (shouldStop()) break
+                val isDoc = scoreOne(p, detector, landmarkDetector, textRecognizer) ?: continue
+                ScoreCache.put(context, p.id, ScoreCache.Entry(
+                    p.faceCount, p.faceQuality, p.sharpness, p.aHash, p.personIds,
+                    isDoc, System.currentTimeMillis(),
+                ))
+                if (i % 20 == 0) ScoreCache.save(context)
+            }
+        } finally {
+            detector.close()
+            landmarkDetector.close()
+            textRecognizer.close()
+        }
+        ScoreCache.save(context)
+        PeopleStore.save(context)
     }
 
     /**

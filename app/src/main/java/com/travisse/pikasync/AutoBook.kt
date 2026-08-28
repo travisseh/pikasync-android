@@ -27,6 +27,20 @@ object AutoBook {
         val month = prev.get(Calendar.MONTH) + 1
         val label = "%04d-%02d".format(year, month)
 
+        // Race guards (both directions of the onboarding/manual overlap): skip
+        // when an interactive build is running, and skip + mark done when a
+        // book for last month already exists in the store.
+        if (com.travisse.pikasync.ui.BookCreator.active?.running == true) {
+            WakeLog.record(context, "bg_book", 0, 0, "skipped $label: interactive build in progress")
+            return
+        }
+        val monthLabel = java.text.SimpleDateFormat("MMMM yyyy", java.util.Locale.US).format(prev.time)
+        if (com.travisse.pikasync.pipeline.RunStore.load(context).any { it.monthLabel == monthLabel }) {
+            prefs.edit().putBoolean(marker, true).apply()
+            WakeLog.record(context, "bg_book", 0, 0, "skipped $label: book already exists")
+            return
+        }
+
         WakeLog.record(context, "bg_book", 0, 0, "generating book for $label")
         val t0 = System.currentTimeMillis()
         val result = PipelineRunner(context).run(year, month, trigger = "bg") { }
